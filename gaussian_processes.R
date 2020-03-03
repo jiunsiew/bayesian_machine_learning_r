@@ -6,6 +6,8 @@
 rm(list = ls())
 library(data.table)
 library(magrittr)
+library(ggplot2)
+theme_set(theme_bw())
 
 ###### GP ML -------------------------------------------------------------------
 ## using Rasmussen & Williams as reference (see www.GaussianProcess.org/gpml)
@@ -40,18 +42,48 @@ sample_mvnorm <- function(n_samples, mu, sigma, x){
   ## return as data table
   output <- as.data.table(t(samples)) %>% 
     .[, x := x] %>% 
-    melt.data.table(., id.vars = "x")
+    .[, mu := mu] %>% 
+    melt.data.table(., id.vars = c("x", "mu"))
   return(output)
 }
 
 
+## predictive posterior 
+posterior_pred <- function(x_new, x_train, y_train, l=1, sigma_f=1, sigma_n=1e-8){
+  
+  ## calculate the covariance matrix
+  # k <- calcSigmaMat(x_train, x_train, l, sigma_f)
+  
+  ## now we calculate the various k matrices
+  k_xx   <- calcSigmaMat(x_train, x_train, l, sigma_f)
+  k_xxs  <- calcSigmaMat(x_train, x_new,   l, sigma_f)
+  k_xsx  <- calcSigmaMat(x_new,   x_train, l, sigma_f)
+  k_xsxs <- calcSigmaMat(x_new,   x_new,   l, sigma_f)
+  
+  ## and the matrix inverses
+  kInv <- solve(k_xx + sigma_n*diag(nrow(k_xx)))
+  predMean <- k_xsx %*% kInv %*% y_train
+  predCov <- k_xsxs - k_xsx %*% kInv %*% k_xxs
+  
+  ## the marginal likelihood
+  marginal_llk <- -0.5*t(y_train) %*% kInv %*% y_train - 
+    0.5*log(det(k_xx + sigma_n*diag(nrow(k_xx)))) - 
+    nrow(x_train)/2*log(2*pi)
+  
+  output <- list(predMean = predMean, 
+                 predCov = predCov,
+                 marginal_llk = marginal_llk)
+  return(output)
+}
 
+## Simple examples -------------------------------------------------------------
 ## replicate https://gist.github.com/jkeirstead/2312411 but we use the 
 ## function above to handle multivariate case
 nSamples <- 25
 sigma_f <- 1
 seedVal <- 202003
 
+## generate some initial input data
 x.star <- as.matrix(seq(-5, 5, len=nSamples))
 covMat <- calcSigmaMat(x.star, x.star)
 
@@ -128,5 +160,73 @@ ggplot() +
   theme_bw()
 
 
-## stopped here:
-## - look at varying hyper parameters and possibly other kernels
+## Varying Hyperparameters -----------------------------------------------------
+seedVal <- 202003
+x_train <- matrix(c(-4,-3,-1,0,2), ncol = 1)
+y_train <- matrix(c(-2,0,1,2,-1), ncol = 1)
+set.seed(seedVal)
+x_new <- matrix(runif(10, min = -15, max = 15), ncol = 1)
+l <- 1
+sigma_f <- 1
+sigma_n <- 0
+
+pred_post <- posterior_pred(x_new, x_train, y_train, l, sigma_f, sigma_n)
+
+predSamplesNoise <- sample_mvnorm(100, 
+                                  pred_post$predMean, 
+                                  pred_post$predCov, 
+                                  x_new)
+
+ggplot() + 
+  geom_line(data=predSamplesNoise, aes(x=x, y=value, group=variable), 
+            colour = "grey50", alpha = 0.2) + 
+  geom_line(data=NULL, aes(x=x_new, y=pred_post$predMean), colour = "red") + 
+  geom_point(data=NULL, aes(x=x_train, y=y_train), colour = "blue") +
+  theme_bw()
+
+
+## vary sigma_f, l and sigma_n
+vec_sigma_f <- c(1)
+vec_l <- c(1, 3)
+vec_sigma_n <- c(1e-8, 1)
+
+all_output <- list()
+all_samples <- list()
+i <- 1
+for (iSf in vec_sigma_f){
+  for (iL in vec_l){
+    for (iSn in vec_sigma_n){
+      pred_post <- posterior_pred(x_new, x_train, y_train, iL, iSf, iSn)
+      pred_samples <- sample_mvnorm(100, 
+                                    pred_post$predMean, 
+                                    pred_post$predCov, 
+                                    x_new) %>% 
+        .[, l := iL] %>% 
+        .[, sigma_f := iSf] %>% 
+        .[, sigma_n := iSn]
+      all_output[[i]] <- pred_post
+      all_samples[[i]] <- pred_samples
+      i <- i + 1
+    }
+  }
+}
+
+allSamplesDf <- rbindlist(all_samples)
+
+ggplot() + 
+  geom_line(data=allSamplesDf, 
+            aes(x=x, y=value, group=variable, colour = as.factor(sigma_n)),
+            alpha = 0.2) +
+  geom_point(data=allSamplesDf, aes(x=x, y=mu, colour = as.factor(sigma_n))) +
+  geom_line(data=allSamplesDf, aes(x=x, y=mu, colour = as.factor(sigma_n))) + 
+  facet_grid(l~sigma_n) + 
+  theme(legend.position = "bottom") + 
+  geom_point(data=data.frame(x=x_train, y=y_train), aes(x=x, y=y), colour = "blue") 
+
+
+## add another data point 
+seedVal <- 202003
+x_train <- matrix(c(-8, -4,-3,-1,0,2,10), ncol = 1)
+y_train <- matrix(c(2, -2,0,1,2,-1,3), ncol = 1)
+set.seed(seedVal)
+x_new <- matrix(runif(10, min = -15, max = 15), ncol = 1)
