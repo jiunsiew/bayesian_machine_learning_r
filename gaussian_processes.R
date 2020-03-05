@@ -1,6 +1,8 @@
 ## gaussian processes from scratch
 ## 
-## ported from https://nbviewer.jupyter.org/github/krasserm/bayesian-machine-learning/blob/master/gaussian_processes.ipynb
+## combining some code from
+## https://nbviewer.jupyter.org/github/krasserm/bayesian-machine-learning/blob/master/gaussian_processes.ipynb
+## and equations from Rasmussen & Williams as reference (see www.GaussianProcess.org/gpml)
 ## see https://github.com/krasserm/bayesian-machine-learning for repo
 
 rm(list = ls())
