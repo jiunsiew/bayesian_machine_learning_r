@@ -51,3 +51,42 @@ ggplot(cleanDat, aes(x = dt, y = co2)) +
 
 ggplot(cleanDat, aes(x = dt_idx, y = co2_norm)) + 
   geom_line()
+
+
+## STAN (by me) ----------------------------------------------------------------
+## see examples https://betanalpha.github.io/assets/case_studies/gp_part1/part1.html#2_gaussian_process_regression
+## other references:
+## https://betanalpha.github.io/writing/
+## https://github.com/betanalpha/knitr_case_studies/tree/master/gaussian_processes
+## https://discourse.mc-stan.org/t/implementig-periodic-covariance-function/1787
+## https://github.com/stan-dev/stan/wiki/Adding-a-Gaussian-Process-Covariance-Function
+## https://github.com/stan-dev/stan/wiki/Adding-a-Gaussian-Process-Covariance-Function
+## https://mc-stan.org/docs/2_19/functions-reference/covariance.html
+## https://docs.pymc.io/notebooks/GP-MaunaLoa.html
+## https://gitlab.com/hnickisch/gpml-matlab/-/tree/master/doc
+## 
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores() - 2)
+
+## run the stan file
+stanData <- list(alpha=3, 
+                 rho=5.5,
+                 sigma=2,
+                 N=sum(cleanDat$isTrain), 
+                 x=cleanDat$co2[cleanDat$isTrain==TRUE])
+
+simu_fit <- stan(file='gp_stan_gaussian_prior.stan',
+                 data=stanData, iter=1,
+                 chains=1, seed=494838, algorithm="Fixed_param")
+
+f_total <- extract(simu_fit)$f[1,]
+y_total <- extract(simu_fit)$y[1,]
+true_realization <- data.table(f_total, stanData$x)
+setnames(true_realization, c("f_total", "x_total"))
+
+## stopped here:
+## - need to work out how to use the output of simu_fit 
+
+## paper on using bayesian for item response theory
+## https://arxiv.org/pdf/1905.09501.pdf
