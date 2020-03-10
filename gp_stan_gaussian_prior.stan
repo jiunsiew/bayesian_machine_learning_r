@@ -17,8 +17,10 @@ parameters {}
 model {}
 
 generated quantities {
+  // mulivariate normal samples
   vector[N] f = multi_normal_cholesky_rng(rep_vector(0, N), L_cov);
   vector[N] y;
   for (n in 1:N)
+    // sample outputs using mean from f
     y[n] = normal_rng(f[n], sigma);
 }
