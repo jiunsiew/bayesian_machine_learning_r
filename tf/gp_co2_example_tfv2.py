@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 import tensorflow_probability as tfp
+import time
 
 import bokeh
 import bokeh.io
@@ -132,6 +133,8 @@ def build_gp(smooth_amplitude, smooth_length_scale,
 
     # Create the GP prior distribution, which we will use to train the model
     # parameters.
+    # note in contrast to peterroelants's model, this one does not include the 
+    # mean as an input parameter prior knowledge.
     return tfd.GaussianProcess(
         kernel=kernel,
         index_points=batch_date,
@@ -176,6 +179,7 @@ print("log_prob of sample: {}".format(lp))
 # Create the trainable model parameters, which we'll subsequently optimize.
 # Note that we constrain them to be strictly positive.
 constrain_positive = tfb.Shift(np.finfo(np.float64).tiny)(tfb.Exp())
+constrain_positive1 = tfb.Shift(1e-10)(tfb.Exp())
 
 # Smooth kernel hyperparameters
 smooth_amplitude_var = tfp.util.TransformedVariable(
@@ -321,13 +325,10 @@ plt.xlabel("Training iteration")
 plt.ylabel("Log marginal likelihood")
 plt.show()
 
-# Having trained the model, we'd like to sample from the posterior conditioned
-# on observations. We'd like the samples to be at points other than the training
+# Having trained the model, sample from the posterior conditioned on 
+# observations. Want the samples to be at points other than the training
 # inputs.
-# predictive_index_points_ = np.linspace(-1.2, 1.2, 200, dtype=np.float64)
 predictive_index_points_ = df_predict.Date.values.reshape(-1, 1)
-# Reshape to [200, 1] -- 1 is the dimensionality of the feature space.
-# predictive_index_points_ = predictive_index_points_[..., np.newaxis]
 
 optimized_kernel = tfk.ExponentiatedQuadratic(amplitude_var, length_scale_var)
 gprm = tfd.GaussianProcessRegressionModel(
@@ -345,105 +346,149 @@ gprm = tfd.GaussianProcessRegressionModel(
 num_samples = 50
 samples = gprm.sample(num_samples)
 
+
+## Marginalise with MCMC -------------------------------------------------------
+num_results = 100
+num_burnin_steps = 50
+
+# setup a sample 
+# need a vector of bijectors to be the same number as the hyperparameters we're
+# trying to marginalise --> 10 in this case including noise
+sampler = tfp.mcmc.TransformedTransitionKernel(
+    tfp.mcmc.HamiltonianMonteCarlo(
+        target_log_prob_fn=target_log_prob,
+        step_size=tf.cast(0.1, tf.float64),
+        num_leapfrog_steps=8),
+    bijector=[constrain_positive, constrain_positive, constrain_positive,
+              constrain_positive, constrain_positive, constrain_positive,
+              constrain_positive, constrain_positive, constrain_positive, 
+              constrain_positive])
+
+adaptive_sampler = tfp.mcmc.DualAveragingStepSizeAdaptation(
+    inner_kernel=sampler,
+    num_adaptation_steps=int(0.8 * num_burnin_steps),
+    target_accept_prob=tf.cast(0.75, tf.float64))
+
+initial_state = [tf.cast(x, tf.float64) for x in [1., 1., 1., 1., 1., 1., 1., 1., 1.,1]]
+
+
+# Speed up sampling by tracing with `tf.function`.
+@tf.function(autograph=False, experimental_compile=False)
+def do_sampling():
+  return tfp.mcmc.sample_chain(
+      kernel=adaptive_sampler,
+      current_state=initial_state,
+      num_results=num_results,
+      num_burnin_steps=num_burnin_steps,
+      trace_fn=lambda current_state, kernel_results: kernel_results)
+
+t0 = time.time()
+samples, kernel_results = do_sampling()
+t1 = time.time()
+print("Inference ran in {:.2f}s.".format(t1-t0))
+
+
+
+
 ### v1 -------------------------------------------------------------------------
 # Plot NLL over iterations
-fig = bokeh.plotting.figure(
-    width=600, height=400, 
-    x_range=(0, nb_iterations), y_range=(50, 200))
-fig.add_layout(bokeh.models.Title(
-    text='Negative Log-Likelihood (NLL) during training', 
-    text_font_size="14pt"), 'above')
-fig.xaxis.axis_label = 'iteration'
-fig.yaxis.axis_label = 'NLL batch'
-# First plot
-fig.line(
-    *zip(*batch_nlls), legend_label='Batch data',
-    line_width=2, line_color='midnightblue')
-# Seoncd plot
-# Setting the second y axis range name and range
-fig.extra_y_ranges = {
-    'fig1ax2': bokeh.models.Range1d(start=130, end=250)}
-fig.line(
-    *zip(*full_ll), legend_label='All observed data',
-    line_width=2, line_color='red', y_range_name='fig1ax2')
-# Adding the second axis to the plot.  
-fig.add_layout(bokeh.models.LinearAxis(
-    y_range_name='fig1ax2', axis_label='NLL all'), 'right')
+# fig = bokeh.plotting.figure(
+#     width=600, height=400, 
+#     x_range=(0, nb_iterations), y_range=(50, 200))
+# fig.add_layout(bokeh.models.Title(
+#     text='Negative Log-Likelihood (NLL) during training', 
+#     text_font_size="14pt"), 'above')
+# fig.xaxis.axis_label = 'iteration'
+# fig.yaxis.axis_label = 'NLL batch'
+# # First plot
+# fig.line(
+#     *zip(*batch_nlls), legend_label='Batch data',
+#     line_width=2, line_color='midnightblue')
+# # Seoncd plot
+# # Setting the second y axis range name and range
+# fig.extra_y_ranges = {
+#     'fig1ax2': bokeh.models.Range1d(start=130, end=250)}
+# fig.line(
+#     *zip(*full_ll), legend_label='All observed data',
+#     line_width=2, line_color='red', y_range_name='fig1ax2')
+# # Adding the second axis to the plot.  
+# fig.add_layout(bokeh.models.LinearAxis(
+#     y_range_name='fig1ax2', axis_label='NLL all'), 'right')
 
-fig.legend.location = 'top_right'
-fig.toolbar.autohide = True
-bokeh.plotting.show(fig)
+# fig.legend.location = 'top_right'
+# fig.toolbar.autohide = True
+# bokeh.plotting.show(fig)
 
-# Show values of parameters found
-variables = [
-    smooth_amplitude,
-    smooth_length_scale,
-    periodic_amplitude,
-    periodic_length_scale,
-    periodic_period,
-    periodic_local_length_scale,
-    irregular_amplitude,
-    irregular_length_scale,
-    irregular_scale_mixture,
-    observation_noise_variance
-]
-variables_eval = session.run(variables)
+# # Show values of parameters found
+# variables = [
+#     smooth_amplitude,
+#     smooth_length_scale,
+#     periodic_amplitude,
+#     periodic_length_scale,
+#     periodic_period,
+#     periodic_local_length_scale,
+#     irregular_amplitude,
+#     irregular_length_scale,
+#     irregular_scale_mixture,
+#     observation_noise_variance
+# ]
+# variables_eval = session.run(variables)
 
-data = list([
-    (var.name[:-2], var_eval) 
-    for var, var_eval in zip(variables, variables_eval)])
-df_variables = pd.DataFrame(
-    data, columns=['Hyperparameters', 'Value'])
-display(HTML(df_variables.to_html(
-    index=False, float_format=lambda x: f'{x:.4f}')))
+# data = list([
+#     (var.name[:-2], var_eval) 
+#     for var, var_eval in zip(variables, variables_eval)])
+# df_variables = pd.DataFrame(
+#     data, columns=['Hyperparameters', 'Value'])
+# display(HTML(df_variables.to_html(
+#     index=False, float_format=lambda x: f'{x:.4f}')))
 
-# Posterior GP using fitted kernel and observed data
-gp_posterior_predict = tfd.GaussianProcessRegressionModel(
-    mean_fn=mean_fn,
-    kernel=kernel,
-    index_points=df_predict.Date.values.reshape(-1, 1),
-    observation_index_points=df_observed.Date.values.reshape(-1, 1),
-    observations=df_observed.CO2.values,
-    observation_noise_variance=observation_noise_variance)
+# # Posterior GP using fitted kernel and observed data
+# gp_posterior_predict = tfd.GaussianProcessRegressionModel(
+#     mean_fn=mean_fn,
+#     kernel=kernel,
+#     index_points=df_predict.Date.values.reshape(-1, 1),
+#     observation_index_points=df_observed.Date.values.reshape(-1, 1),
+#     observations=df_observed.CO2.values,
+#     observation_noise_variance=observation_noise_variance)
 
-# Posterior mean and standard deviation
-posterior_mean_predict = gp_posterior_predict.mean()
-posterior_std_predict = gp_posterior_predict.stddev()
+# # Posterior mean and standard deviation
+# posterior_mean_predict = gp_posterior_predict.mean()
+# posterior_std_predict = gp_posterior_predict.stddev()
 
-# Plot posterior predictions
+# # Plot posterior predictions
 
-# Get posterior predictions
-μ = session.run(posterior_mean_predict)
-σ = session.run(posterior_std_predict)
+# # Get posterior predictions
+# μ = session.run(posterior_mean_predict)
+# σ = session.run(posterior_std_predict)
 
-# Plot
-fig = bokeh.plotting.figure(
-    width=600, height=400,
-    x_range=(2008, 2019), y_range=(380, 415))
-fig.xaxis.axis_label = 'Date'
-fig.yaxis.axis_label = 'CO₂ (ppm)'
-fig.add_layout(bokeh.models.Title(
-    text='Posterior predictions conditioned on observations before 2008.',
-    text_font_style="italic"), 'above')
-fig.add_layout(bokeh.models.Title(
-    text='Atmospheric CO₂ concentrations', 
-    text_font_size="14pt"), 'above')
-fig.circle(
-    co2_df.Date, co2_df.CO2, legend_label='True data',
-    size=2, line_color='midnightblue')
-fig.line(
-    df_predict.Date.values, μ, legend_label='μ (predictions)',
-    line_width=2, line_color='firebrick')
-# Prediction interval
-band_x = np.append(
-    df_predict.Date.values, df_predict.Date.values[::-1])
-band_y = np.append(
-    (μ + 2*σ), (μ - 2*σ)[::-1])
-fig.patch(
-    band_x, band_y, color='firebrick', alpha=0.4, 
-    line_color='firebrick', legend_label='2σ')
+# # Plot
+# fig = bokeh.plotting.figure(
+#     width=600, height=400,
+#     x_range=(2008, 2019), y_range=(380, 415))
+# fig.xaxis.axis_label = 'Date'
+# fig.yaxis.axis_label = 'CO₂ (ppm)'
+# fig.add_layout(bokeh.models.Title(
+#     text='Posterior predictions conditioned on observations before 2008.',
+#     text_font_style="italic"), 'above')
+# fig.add_layout(bokeh.models.Title(
+#     text='Atmospheric CO₂ concentrations', 
+#     text_font_size="14pt"), 'above')
+# fig.circle(
+#     co2_df.Date, co2_df.CO2, legend_label='True data',
+#     size=2, line_color='midnightblue')
+# fig.line(
+#     df_predict.Date.values, μ, legend_label='μ (predictions)',
+#     line_width=2, line_color='firebrick')
+# # Prediction interval
+# band_x = np.append(
+#     df_predict.Date.values, df_predict.Date.values[::-1])
+# band_y = np.append(
+#     (μ + 2*σ), (μ - 2*σ)[::-1])
+# fig.patch(
+#     band_x, band_y, color='firebrick', alpha=0.4, 
+#     line_color='firebrick', legend_label='2σ')
 
-fig.legend.location = 'top_left'
-fig.toolbar.autohide = True
-bokeh.plotting.show(fig)
-#
+# fig.legend.location = 'top_left'
+# fig.toolbar.autohide = True
+# bokeh.plotting.show(fig)
+# #
